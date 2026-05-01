@@ -1,70 +1,74 @@
-# Getting Started with Create React App
+# 🛠️ Old School Garage — Sistema de Gestão Full-Stack (v2.0.0)
 
-This project was bootstrapped with [Create React App](https://github.com/facebook/create-react-app).
+Um sistema completo (Full-Stack) desenvolvido para o controle de estoque e gestão comercial. O projeto é dividido em uma API RESTful robusta e uma interface de usuário interativa, projetado com foco rigoroso em segurança da informação (ABNT NBR ISO/IEC 27001) e total conformidade com a Lei Geral de Proteção de Dados (LGPD - Lei 13.709/2018).
 
-## Available Scripts
+## 📌 Arquitetura e Tecnologias
 
-In the project directory, you can run:
+### ⚙️ Backend (API REST)
+Estruturado em **Node.js** utilizando o framework **Express**[cite: 1], com persistência de dados em um banco de dados relacional **SQLite**[cite: 1].
+- **Banco de Dados:** SQLite3 (com `PRAGMA foreign_keys = ON` para garantia de integridade referencial)[cite: 1].
+- **Criptografia:** Crypto-js (Padrão AES)[cite: 1].
+- **Segurança e Middlewares:** Helmet, CORS, Express Rate Limit[cite: 1].
 
-### `npm start`
+### 🖥️ Frontend (Interface do Usuário)
+Desenvolvido em **React**, inicializado através do [Create React App](https://github.com/facebook/create-react-app).
+- **Gerenciamento de Estado e Componentização:** React puro.
+- **Integração:** Consumo da API RESTful via rotas assíncronas.
 
-Runs the app in the development mode.\
-Open [http://localhost:3000](http://localhost:3000) to view it in your browser.
+---
 
-The page will reload when you make changes.\
-You may also see any lint errors in the console.
+## 🛡️ Segurança da Informação e Conformidade (LGPD)
+O backend foi desenhado com princípios de *Privacy by Design*:
+- **Proteção de Dados Sensíveis:** O CPF dos clientes é salvo no banco de dados sob criptografia AES (`CPF_CRIPTO`)[cite: 1].
+- **Trilha de Auditoria (Art. 37, LGPD):** Tabela exclusiva (`AUDITORIA`) que registra operações de `INSERT`, `UPDATE` e `DELETE`, capturando o IP de origem[cite: 1].
+- **Consentimento Explícito (Art. 7, LGPD):** Validação obrigatória do consentimento durante o cadastro de novos clientes[cite: 1].
+- **Direito ao Esquecimento (Art. 18, LGPD):** Rota específica de exclusão lógica que realiza a anonimização dos dados pessoais do cliente[cite: 1].
+- **Prevenção contra Ataques:** Utilização de `helmet` e `rate-limit` (máximo de 300 requisições/15 min) para prevenir sobrecarga e ataques de força bruta[cite: 1].
 
-### `npm test`
+---
 
-Launches the test runner in the interactive watch mode.\
-See the section about [running tests](https://facebook.github.io/create-react-app/docs/running-tests) for more information.
+## 🗄️ Modelagem do Banco de Dados
+A API gerencia as seguintes entidades principais[cite: 1]:
+- **FORNECEDORES:** Controle de credores, com exclusão lógica (`ATIVO = 0`).
+- **PRODUTOS:** Controle de estoque validado e associado a fornecedores.
+- **CLIENTES:** Gestão de consumidores com métricas automáticas.
+- **VENDAS:** Registro transacional que debita automaticamente o estoque.
 
-### `npm run build`
+---
 
-Builds the app for production to the `build` folder.\
-It correctly bundles React in production mode and optimizes the build for the best performance.
+## 🚀 Como Executar o Projeto Localmente
 
-The build is minified and the filenames include the hashes.\
-Your app is ready to be deployed!
+Como o projeto é Full-Stack, você precisará rodar o Backend e o Frontend em terminais separados.
 
-See the section about [deployment](https://facebook.github.io/create-react-app/docs/deployment) for more information.
+### 1. Rodando o Backend (API)
+Abra um terminal na pasta raiz do projeto:
+\`\`\`bash
+# Instale as dependências da API
+npm install
 
-### `npm run eject`
+# Inicie o servidor
+node app.js
+\`\`\`
+> A API estará escutando as requisições em `http://localhost:3000`[cite: 1]. O banco de dados `database.db` será gerado automaticamente na primeira execução[cite: 1].
 
-**Note: this is a one-way operation. Once you `eject`, you can't go back!**
+### 2. Rodando o Frontend (React)
+Abra um **segundo terminal** na pasta do frontend (ex: `frontend-projeto`):
+\`\`\`bash
+# Instale as dependências da interface
+npm install
 
-If you aren't satisfied with the build tool and configuration choices, you can `eject` at any time. This command will remove the single build dependency from your project.
+# Inicie a aplicação React
+npm start
+\`\`\`
+> O frontend rodará no modo de desenvolvimento. Abra [http://localhost:3001](http://localhost:3001) para visualizá-lo no navegador (a API está configurada para aceitar requisições desta porta via CORS)[cite: 1].
 
-Instead, it will copy all the configuration files and the transitive dependencies (webpack, Babel, ESLint, etc) right into your project so you have full control over them. All of the commands except `eject` will still work, but they will point to the copied scripts so you can tweak them. At this point you're on your own.
+---
 
-You don't have to ever use `eject`. The curated feature set is suitable for small and middle deployments, and you shouldn't feel obligated to use this feature. However we understand that this tool wouldn't be useful if you couldn't customize it when you are ready for it.
+## 📜 Scripts Adicionais do Frontend (Create React App)
 
-## Learn More
+Na pasta do frontend, você também pode executar:
+- `npm test`: Inicia o test runner no modo interativo.
+- `npm run build`: Compila o app para produção na pasta `build`, otimizando e minificando os arquivos para a melhor performance.
+- `npm run eject`: *Aviso: Operação irreversível.* Remove a dependência de build única e copia as configurações para controle total.
 
-You can learn more in the [Create React App documentation](https://facebook.github.io/create-react-app/docs/getting-started).
-
-To learn React, check out the [React documentation](https://reactjs.org/).
-
-### Code Splitting
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/code-splitting](https://facebook.github.io/create-react-app/docs/code-splitting)
-
-### Analyzing the Bundle Size
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size](https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size)
-
-### Making a Progressive Web App
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app](https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app)
-
-### Advanced Configuration
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/advanced-configuration](https://facebook.github.io/create-react-app/docs/advanced-configuration)
-
-### Deployment
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/deployment](https://facebook.github.io/create-react-app/docs/deployment)
-
-### `npm run build` fails to minify
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify](https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify)
+Para aprender mais, consulte a [Documentação do React](https://reactjs.org/) e do [Create React App](https://facebook.github.io/create-react-app/docs/getting-started).

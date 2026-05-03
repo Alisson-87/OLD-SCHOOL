@@ -1,5 +1,19 @@
 # Old School Garage — Sistema de Gestão Full-Stack
 
+## 🌐 API Online — Replit
+
+A API está disponível publicamente em:
+
+**https://995538a8-a251-492f-a1b3-63a13300100f-00-3j44c1nby0ea.spock.replit.dev**
+
+Credenciais de acesso ao sistema:
+- **E-mail:** dom@torettodragrace.com
+- **Senha:** admin123
+
+Ou para o tutor:
+- **E-mail:** tutor@grancursos.com  
+- **Senha:** tutor123
+
 **Versão:** 2.0.0
 **Disciplina:** Projeto Integrador — Desenvolvimento Full-Stack
 **Instituição:** Gran Faculdade

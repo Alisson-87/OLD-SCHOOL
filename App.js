@@ -5,29 +5,33 @@ const cors = require('cors');
 const helmet = require('helmet');
 const CryptoJS = require('crypto-js');
 const rateLimit = require('express-rate-limit');
+const bcrypt = require('bcrypt');
+const jwt = require('jsonwebtoken');
 
 const app = express();
-const SECRET_KEY = process.env.SECRET_KEY || 'osg-secret-2026-change-in-prod';
+const SECRET_KEY = process.env.SECRET_KEY || 'osg-aes-secret-2026';
+const JWT_SECRET = process.env.JWT_SECRET || 'osg-jwt-secret-2026';
 const PORT = process.env.PORT || 3000;
 const FORMAS_DESCONTO = ['DINHEIRO', 'PIX'];
 const TAXA_DESCONTO = 0.10;
+const BCRYPT_ROUNDS = 12;
 
 app.use(helmet());
-app.use(cors({ origin: process.env.ORIGIN || '*' }));
+app.use(cors({ origin: process.env.ORIGIN || 'http://localhost:3001' }));
 app.use(express.json({ limit: '2mb' }));
 app.use(rateLimit({
     windowMs: 15 * 60 * 1000,
     max: 500,
     standardHeaders: true,
     legacyHeaders: false,
-    message: { erro: 'Muitas requisições. Tente novamente em 15 minutos.' }
+    message: { erro: 'Muitas requisições. Tente novamente em 15 minutos.' },
 }));
 
 let db;
 
-function sanitize(value) {
-    if (typeof value !== 'string') return value;
-    return value.replace(/[<>]/g, '').trim();
+function sanitize(v) {
+    if (typeof v !== 'string') return v;
+    return v.replace(/[<>"'`]/g, '').trim();
 }
 
 function validarEmail(email) {
@@ -36,24 +40,34 @@ function validarEmail(email) {
 
 function validarCnpj(cnpj) {
     const c = cnpj.replace(/\D/g, '');
-    if (c.length !== 14) return false;
-    if (/^(\d)\1+$/.test(c)) return false;
+    if (c.length !== 14 || /^(\d)\1+$/.test(c)) return false;
     const calc = (len) => {
-        let sum = 0, pos = len - 7;
-        for (let i = len; i >= 1; i--) {
-            sum += parseInt(c.charAt(len - i)) * pos--;
-            if (pos < 2) pos = 9;
-        }
-        const r = sum % 11 < 2 ? 0 : 11 - (sum % 11);
-        return r === parseInt(c.charAt(len));
+        let s = 0, pos = len - 7;
+        for (let i = len; i >= 1; i--) { s += parseInt(c[len - i]) * pos--; if (pos < 2) pos = 9; }
+        return (s % 11 < 2 ? 0 : 11 - (s % 11)) === parseInt(c[len]);
     };
     return calc(12) && calc(13);
+}
+
+function autenticar(req, res, next) {
+    const header = req.headers['authorization'];
+    if (!header || !header.startsWith('Bearer ')) return res.status(401).json({ erro: 'Não autorizado.' });
+    try { req.usuario = jwt.verify(header.split(' ')[1], JWT_SECRET); next(); }
+    catch { res.status(401).json({ erro: 'Token inválido ou expirado. Faça login novamente.' }); }
 }
 
 async function initDb() {
     db = await open({ filename: './database.db', driver: sqlite3.Database });
     await db.run('PRAGMA foreign_keys = ON');
     await db.run('PRAGMA journal_mode = WAL');
+
+    await db.run(`CREATE TABLE IF NOT EXISTS USUARIOS (
+        ID INTEGER PRIMARY KEY AUTOINCREMENT,
+        NOME TEXT NOT NULL,
+        EMAIL TEXT NOT NULL UNIQUE,
+        SENHA_HASH TEXT NOT NULL,
+        CRIADO_EM TEXT DEFAULT (datetime('now','localtime'))
+    )`);
 
     await db.run(`CREATE TABLE IF NOT EXISTS FORNECEDORES (
         ID INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -154,16 +168,16 @@ async function initDb() {
         CRIADO_EM TEXT DEFAULT (datetime('now','localtime'))
     )`);
 
-    const colsVendas = await db.all('PRAGMA table_info(VENDAS)');
-    const nomesVendas = colsVendas.map(c => c.name);
-    if (!nomesVendas.includes('FORMA_PAGAMENTO')) await db.run("ALTER TABLE VENDAS ADD COLUMN FORMA_PAGAMENTO TEXT DEFAULT 'DINHEIRO'");
-    if (!nomesVendas.includes('PAGO')) await db.run('ALTER TABLE VENDAS ADD COLUMN PAGO INTEGER DEFAULT 1');
-    if (!nomesVendas.includes('DATA_VENCIMENTO')) await db.run('ALTER TABLE VENDAS ADD COLUMN DATA_VENCIMENTO TEXT');
-    if (!nomesVendas.includes('DATA_PAGAMENTO')) await db.run('ALTER TABLE VENDAS ADD COLUMN DATA_PAGAMENTO TEXT');
-    if (!nomesVendas.includes('DESCONTO_PERCENTUAL')) await db.run('ALTER TABLE VENDAS ADD COLUMN DESCONTO_PERCENTUAL REAL DEFAULT 0');
+    const cols = await db.all('PRAGMA table_info(VENDAS)');
+    const nomes = cols.map(c => c.name);
+    if (!nomes.includes('FORMA_PAGAMENTO')) await db.run("ALTER TABLE VENDAS ADD COLUMN FORMA_PAGAMENTO TEXT DEFAULT 'DINHEIRO'");
+    if (!nomes.includes('PAGO')) await db.run('ALTER TABLE VENDAS ADD COLUMN PAGO INTEGER DEFAULT 1');
+    if (!nomes.includes('DATA_VENCIMENTO')) await db.run('ALTER TABLE VENDAS ADD COLUMN DATA_VENCIMENTO TEXT');
+    if (!nomes.includes('DATA_PAGAMENTO')) await db.run('ALTER TABLE VENDAS ADD COLUMN DATA_PAGAMENTO TEXT');
+    if (!nomes.includes('DESCONTO_PERCENTUAL')) await db.run('ALTER TABLE VENDAS ADD COLUMN DESCONTO_PERCENTUAL REAL DEFAULT 0');
 }
 
-const ok   = (res, data, status = 200) => res.status(status).json(data);
+const ok = (res, data, status = 200) => res.status(status).json(data);
 const fail = (res, msg, status = 400) => res.status(status).json({ erro: msg });
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
@@ -176,8 +190,39 @@ async function audit(tabela, op, id, antes, depois, ip) {
     } catch (_) {}
 }
 
+const limiterAuth = rateLimit({ windowMs: 15 * 60 * 1000, max: 20, message: { erro: 'Muitas tentativas. Aguarde 15 minutos.' } });
+
+app.post('/auth/register', limiterAuth, wrap(async (req, res) => {
+    const nome = sanitize(req.body.nome || '');
+    const email = sanitize(req.body.email || '').toLowerCase();
+    const senha = req.body.senha || '';
+    if (!nome || nome.length < 2) return fail(res, 'Nome deve ter ao menos 2 caracteres');
+    if (!email || !validarEmail(email)) return fail(res, 'E-mail inválido');
+    if (!senha || senha.length < 6) return fail(res, 'A senha deve ter no mínimo 6 caracteres');
+    const existe = await db.get('SELECT ID FROM USUARIOS WHERE EMAIL=?', [email]);
+    if (existe) return fail(res, 'Este e-mail já está cadastrado.', 409);
+    const hash = await bcrypt.hash(senha, BCRYPT_ROUNDS);
+    const r = await db.run('INSERT INTO USUARIOS (NOME,EMAIL,SENHA_HASH) VALUES (?,?,?)', [nome, email, hash]);
+    await audit('USUARIOS', 'REGISTER', r.lastID, null, { nome, email }, req.ip);
+    ok(res, { msg: 'Conta criada com sucesso!' }, 201);
+}));
+
+app.post('/auth/login', limiterAuth, wrap(async (req, res) => {
+    const email = sanitize(req.body.email || '').toLowerCase();
+    const senha = req.body.senha || '';
+    if (!email || !senha) return fail(res, 'E-mail e senha são obrigatórios');
+    const usuario = await db.get('SELECT * FROM USUARIOS WHERE EMAIL=?', [email]);
+    const senhaOk = usuario ? await bcrypt.compare(senha, usuario.SENHA_HASH) : false;
+    if (!usuario || !senhaOk) return fail(res, 'Credenciais inválidas.', 401);
+    const token = jwt.sign({ id: usuario.ID, nome: usuario.NOME, email: usuario.EMAIL }, JWT_SECRET, { expiresIn: '8h' });
+    await audit('USUARIOS', 'LOGIN', usuario.ID, null, { email }, req.ip);
+    ok(res, { token, nome: usuario.NOME, email: usuario.EMAIL });
+}));
+
+app.use(autenticar);
+
 app.get('/dashboard', wrap(async (req, res) => {
-    const [totalProds, totalForns, totalClis, totalVendas, totalAPagar, totalAReceber] = await Promise.all([
+    const [tp, tf, tc, tv, tap, tar] = await Promise.all([
         db.get('SELECT COUNT(*) n FROM PRODUTOS WHERE ATIVO=1'),
         db.get('SELECT COUNT(*) n FROM FORNECEDORES WHERE ATIVO=1'),
         db.get('SELECT COUNT(*) n FROM CLIENTES WHERE ATIVO=1'),
@@ -185,32 +230,24 @@ app.get('/dashboard', wrap(async (req, res) => {
         db.get('SELECT COALESCE(SUM(VALOR_DEVIDO),0) total FROM FORNECEDORES WHERE ATIVO=1'),
         db.get('SELECT COALESCE(SUM(TOTAL),0) total FROM VENDAS WHERE PAGO=0'),
     ]);
-
     const [estoqueBaixo, vendasRecentes, contasAPagar, contasAReceber] = await Promise.all([
         db.all('SELECT ID,NOME_PRODUTO,QUANTIDADE FROM PRODUTOS WHERE QUANTIDADE<=5 AND ATIVO=1 ORDER BY QUANTIDADE ASC'),
         db.all(`SELECT V.ID,V.CRIADO_EM,V.TOTAL,V.PAGO,V.FORMA_PAGAMENTO,V.DESCONTO_PERCENTUAL,P.NOME_PRODUTO,C.NOME_COMPLETO
                 FROM VENDAS V LEFT JOIN PRODUTOS P ON V.PRODUTO_ID=P.ID LEFT JOIN CLIENTES C ON V.CLIENTE_ID=C.ID
                 ORDER BY V.ID DESC LIMIT 5`),
-        db.all(`SELECT E.ID,E.TOTAL,E.DATA_VENCIMENTO,E.CRIADO_EM,P.NOME_PRODUTO,F.NOME_EMPRESA
+        db.all(`SELECT E.ID,E.TOTAL,E.DATA_VENCIMENTO,P.NOME_PRODUTO,F.NOME_EMPRESA
                 FROM ENTRADAS E JOIN PRODUTOS P ON E.PRODUTO_ID=P.ID JOIN FORNECEDORES F ON E.FORNECEDOR_ID=F.ID
                 WHERE E.PAGO=0 ORDER BY E.DATA_VENCIMENTO ASC LIMIT 10`),
-        db.all(`SELECT V.ID,V.TOTAL,V.DATA_VENCIMENTO,V.CRIADO_EM,P.NOME_PRODUTO,C.NOME_COMPLETO
+        db.all(`SELECT V.ID,V.TOTAL,V.DATA_VENCIMENTO,P.NOME_PRODUTO,C.NOME_COMPLETO
                 FROM VENDAS V LEFT JOIN PRODUTOS P ON V.PRODUTO_ID=P.ID LEFT JOIN CLIENTES C ON V.CLIENTE_ID=C.ID
                 WHERE V.PAGO=0 ORDER BY V.DATA_VENCIMENTO ASC LIMIT 10`),
     ]);
-
     ok(res, {
-        total_produtos: totalProds.n,
-        total_fornecedores: totalForns.n,
-        total_clientes: totalClis.n,
-        total_vendas: totalVendas.total,
-        qtd_vendas: totalVendas.qtd,
-        total_a_pagar: totalAPagar.total,
-        total_a_receber: totalAReceber.total,
-        estoque_baixo: estoqueBaixo,
-        vendas_recentes: vendasRecentes,
-        contas_a_pagar: contasAPagar,
-        contas_a_receber: contasAReceber,
+        total_produtos: tp.n, total_fornecedores: tf.n, total_clientes: tc.n,
+        total_vendas: tv.total, qtd_vendas: tv.qtd,
+        total_a_pagar: tap.total, total_a_receber: tar.total,
+        estoque_baixo: estoqueBaixo, vendas_recentes: vendasRecentes,
+        contas_a_pagar: contasAPagar, contas_a_receber: contasAReceber,
     });
 }));
 
@@ -219,13 +256,12 @@ app.get('/produtos', wrap(async (req, res) => {
     const page = Math.max(1, parseInt(req.query.page) || 1);
     const limit = Math.min(200, parseInt(req.query.limit) || 100);
     const like = `%${search.toUpperCase()}%`;
-    const offset = (page - 1) * limit;
     const rows = await db.all(
         `SELECT P.*,F.NOME_EMPRESA FORNECEDOR_NOME FROM PRODUTOS P
          LEFT JOIN FORNECEDORES F ON P.FORNECEDOR_ID=F.ID
          WHERE P.ATIVO=1 AND (P.NOME_PRODUTO LIKE ? OR COALESCE(P.CODIGO_BARRAS,'') LIKE ?)
          ORDER BY P.NOME_PRODUTO LIMIT ? OFFSET ?`,
-        [like, like, limit, offset]
+        [like, like, limit, (page - 1) * limit]
     );
     const { n } = await db.get('SELECT COUNT(*) n FROM PRODUTOS WHERE ATIVO=1');
     ok(res, { data: rows, total: n, page });
@@ -235,14 +271,12 @@ app.get('/produtos/:id', wrap(async (req, res) => {
     const id = parseInt(req.params.id);
     if (!id) return fail(res, 'ID inválido', 400);
     const prod = await db.get(
-        `SELECT P.*,F.NOME_EMPRESA FORNECEDOR_NOME FROM PRODUTOS P
-         LEFT JOIN FORNECEDORES F ON P.FORNECEDOR_ID=F.ID WHERE P.ID=? AND P.ATIVO=1`,
+        'SELECT P.*,F.NOME_EMPRESA FORNECEDOR_NOME FROM PRODUTOS P LEFT JOIN FORNECEDORES F ON P.FORNECEDOR_ID=F.ID WHERE P.ID=? AND P.ATIVO=1',
         [id]
     );
     if (!prod) return fail(res, 'Produto não encontrado', 404);
     const fAssoc = await db.all(
-        `SELECT F.ID,F.NOME_EMPRESA,F.CNPJ FROM FORNECEDORES F
-         JOIN PRODUTO_FORNECEDOR PF ON F.ID=PF.FORNECEDOR_ID WHERE PF.PRODUTO_ID=?`,
+        'SELECT F.ID,F.NOME_EMPRESA,F.CNPJ FROM FORNECEDORES F JOIN PRODUTO_FORNECEDOR PF ON F.ID=PF.FORNECEDOR_ID WHERE PF.PRODUTO_ID=?',
         [id]
     );
     ok(res, { ...prod, fornecedores_associados: fAssoc });
@@ -257,18 +291,15 @@ app.post('/produtos', wrap(async (req, res) => {
     const quantidade = parseInt(req.body.quantidade) || 0;
     const preco = parseFloat(req.body.preco) || 0;
     const fornecedor_id = parseInt(req.body.fornecedor_id) || null;
-
     if (!nome) return fail(res, 'Nome do produto é obrigatório');
     if (!descricao) return fail(res, 'Descrição é obrigatória');
     if (!categoria) return fail(res, 'Categoria é obrigatória');
     if (preco < 0) return fail(res, 'Preço não pode ser negativo');
     if (quantidade < 0) return fail(res, 'Quantidade não pode ser negativa');
-
     if (codigo_barras) {
         const dup = await db.get('SELECT ID FROM PRODUTOS WHERE CODIGO_BARRAS=? AND ATIVO=1', [codigo_barras]);
         if (dup) return fail(res, 'Produto com este código de barras já está cadastrado!', 409);
     }
-
     const r = await db.run(
         'INSERT INTO PRODUTOS (NOME_PRODUTO,CODIGO_BARRAS,DESCRICAO,QUANTIDADE,PRECO,CATEGORIA,DATA_VALIDADE,FORNECEDOR_ID) VALUES (?,?,?,?,?,?,?,?)',
         [nome.toUpperCase(), codigo_barras || null, descricao, quantidade, preco, categoria.toUpperCase(), data_validade || null, fornecedor_id]
@@ -282,7 +313,6 @@ app.put('/produtos/:id', wrap(async (req, res) => {
     if (!id) return fail(res, 'ID inválido', 400);
     const ant = await db.get('SELECT * FROM PRODUTOS WHERE ID=?', [id]);
     if (!ant) return fail(res, 'Produto não encontrado', 404);
-
     const nome = sanitize(req.body.nome || '') || ant.NOME_PRODUTO;
     const descricao = sanitize(req.body.descricao || '') || ant.DESCRICAO;
     const categoria = sanitize(req.body.categoria || '') || ant.CATEGORIA;
@@ -291,7 +321,6 @@ app.put('/produtos/:id', wrap(async (req, res) => {
     const quantidade = req.body.quantidade !== undefined ? parseInt(req.body.quantidade) : ant.QUANTIDADE;
     const preco = req.body.preco !== undefined ? parseFloat(req.body.preco) : ant.PRECO;
     const fornecedor_id = req.body.fornecedor_id ? parseInt(req.body.fornecedor_id) : ant.FORNECEDOR_ID;
-
     await db.run(
         `UPDATE PRODUTOS SET NOME_PRODUTO=?,CODIGO_BARRAS=?,DESCRICAO=?,QUANTIDADE=?,PRECO=?,
          CATEGORIA=?,DATA_VALIDADE=?,FORNECEDOR_ID=?,ATUALIZADO_EM=datetime('now','localtime') WHERE ID=?`,
@@ -312,11 +341,9 @@ app.delete('/produtos/:id', wrap(async (req, res) => {
 }));
 
 app.get('/entradas', wrap(async (req, res) => {
-    ok(res, await db.all(`
-        SELECT E.*,P.NOME_PRODUTO,F.NOME_EMPRESA FROM ENTRADAS E
-        JOIN PRODUTOS P ON E.PRODUTO_ID=P.ID JOIN FORNECEDORES F ON E.FORNECEDOR_ID=F.ID
-        ORDER BY E.ID DESC LIMIT 50
-    `));
+    ok(res, await db.all(
+        'SELECT E.*,P.NOME_PRODUTO,F.NOME_EMPRESA FROM ENTRADAS E JOIN PRODUTOS P ON E.PRODUTO_ID=P.ID JOIN FORNECEDORES F ON E.FORNECEDOR_ID=F.ID ORDER BY E.ID DESC LIMIT 50'
+    ));
 }));
 
 app.post('/entradas', wrap(async (req, res) => {
@@ -325,17 +352,14 @@ app.post('/entradas', wrap(async (req, res) => {
     const quantidade = parseInt(req.body.quantidade);
     const preco_unitario = parseFloat(req.body.preco_unitario);
     const data_vencimento = sanitize(req.body.data_vencimento || '');
-
     if (!produto_id) return fail(res, 'Produto é obrigatório');
     if (!fornecedor_id) return fail(res, 'Fornecedor é obrigatório');
     if (!quantidade || quantidade <= 0) return fail(res, 'Quantidade deve ser maior que zero');
     if (!preco_unitario || preco_unitario <= 0) return fail(res, 'Preço unitário deve ser maior que zero');
-
     const prod = await db.get('SELECT * FROM PRODUTOS WHERE ID=? AND ATIVO=1', [produto_id]);
     if (!prod) return fail(res, 'Produto não encontrado', 404);
     const forn = await db.get('SELECT * FROM FORNECEDORES WHERE ID=? AND ATIVO=1', [fornecedor_id]);
     if (!forn) return fail(res, 'Fornecedor não encontrado', 404);
-
     const total = quantidade * preco_unitario;
     const r = await db.run(
         'INSERT INTO ENTRADAS (PRODUTO_ID,FORNECEDOR_ID,QUANTIDADE,PRECO_UNITARIO,TOTAL,DATA_VENCIMENTO) VALUES (?,?,?,?,?,?)',
@@ -343,7 +367,7 @@ app.post('/entradas', wrap(async (req, res) => {
     );
     await db.run("UPDATE PRODUTOS SET QUANTIDADE=QUANTIDADE+?,ATUALIZADO_EM=datetime('now','localtime') WHERE ID=?", [quantidade, produto_id]);
     await db.run("UPDATE FORNECEDORES SET VALOR_DEVIDO=VALOR_DEVIDO+?,ATUALIZADO_EM=datetime('now','localtime') WHERE ID=?", [total, fornecedor_id]);
-    await audit('ENTRADAS', 'INSERT', r.lastID, null, req.body, req.ip);
+    await audit('ENTRADAS', 'INSERT', r.lastID, null, { produto_id, fornecedor_id, quantidade, total }, req.ip);
     ok(res, { msg: `Entrada registrada! +${quantidade} un. de "${prod.NOME_PRODUTO}". Débito de R$ ${total.toFixed(2)} gerado para "${forn.NOME_EMPRESA}".`, id: r.lastID }, 201);
 }));
 
@@ -367,27 +391,23 @@ app.post('/fornecedores', wrap(async (req, res) => {
     const nome = sanitize(req.body.nome || '');
     const email = sanitize(req.body.email || '');
     const telefone = sanitize(req.body.telefone || '');
-    const contato_principal = sanitize(req.body.contato_principal || '');
+    const contato = sanitize(req.body.contato_principal || '');
     const endereco = sanitize(req.body.endereco || '');
     const condicao = sanitize(req.body.condicao || '');
     const cnpj = req.body.cnpj ? req.body.cnpj.replace(/\D/g, '') : null;
     const devido = parseFloat(req.body.devido) || 0;
-
     if (!nome) return fail(res, 'Nome da empresa é obrigatório');
-    if (!email) return fail(res, 'E-mail é obrigatório');
-    if (!validarEmail(email)) return fail(res, 'E-mail inválido');
+    if (!email || !validarEmail(email)) return fail(res, 'E-mail inválido');
     if (!telefone) return fail(res, 'Telefone é obrigatório');
-    if (!contato_principal) return fail(res, 'Contato principal é obrigatório');
+    if (!contato) return fail(res, 'Contato principal é obrigatório');
     if (cnpj && !validarCnpj(cnpj)) return fail(res, 'CNPJ inválido');
-
     if (cnpj) {
         const dup = await db.get('SELECT ID FROM FORNECEDORES WHERE CNPJ=? AND ATIVO=1', [cnpj]);
         if (dup) return fail(res, 'Fornecedor com esse CNPJ já está cadastrado!', 409);
     }
-
     const r = await db.run(
         'INSERT INTO FORNECEDORES (NOME_EMPRESA,CNPJ,ENDERECO,TELEFONE,EMAIL,CONTATO_PRINCIPAL,VALOR_DEVIDO,CONDICAO_PAGAMENTO) VALUES (?,?,?,?,?,?,?,?)',
-        [nome.toUpperCase(), cnpj || null, endereco || null, telefone, email.toLowerCase(), contato_principal, devido, condicao.toUpperCase() || null]
+        [nome.toUpperCase(), cnpj || null, endereco || null, telefone, email.toLowerCase(), contato, devido, condicao.toUpperCase() || null]
     );
     await audit('FORNECEDORES', 'INSERT', r.lastID, null, { nome, email }, req.ip);
     ok(res, { msg: 'Fornecedor cadastrado com sucesso!', id: r.lastID }, 201);
@@ -398,23 +418,20 @@ app.put('/fornecedores/:id', wrap(async (req, res) => {
     if (!id) return fail(res, 'ID inválido', 400);
     const ant = await db.get('SELECT * FROM FORNECEDORES WHERE ID=?', [id]);
     if (!ant) return fail(res, 'Fornecedor não encontrado', 404);
-
     const nome = sanitize(req.body.nome || '') || ant.NOME_EMPRESA;
     const email = sanitize(req.body.email || '') || ant.EMAIL;
     const telefone = sanitize(req.body.telefone || '') || ant.TELEFONE;
-    const contato_principal = sanitize(req.body.contato_principal || '') || ant.CONTATO_PRINCIPAL;
+    const contato = sanitize(req.body.contato_principal || '') || ant.CONTATO_PRINCIPAL;
     const endereco = sanitize(req.body.endereco || '') || ant.ENDERECO;
     const condicao = sanitize(req.body.condicao || '') || ant.CONDICAO_PAGAMENTO;
     const cnpj = req.body.cnpj ? req.body.cnpj.replace(/\D/g, '') : ant.CNPJ;
     const devido = req.body.devido !== undefined ? parseFloat(req.body.devido) : ant.VALOR_DEVIDO;
-
     if (email && !validarEmail(email)) return fail(res, 'E-mail inválido');
     if (cnpj && cnpj !== ant.CNPJ && !validarCnpj(cnpj)) return fail(res, 'CNPJ inválido');
-
     await db.run(
         `UPDATE FORNECEDORES SET NOME_EMPRESA=?,CNPJ=?,ENDERECO=?,TELEFONE=?,EMAIL=?,
          CONTATO_PRINCIPAL=?,VALOR_DEVIDO=?,CONDICAO_PAGAMENTO=?,ATUALIZADO_EM=datetime('now','localtime') WHERE ID=?`,
-        [nome.toUpperCase(), cnpj, endereco, telefone, email.toLowerCase(), contato_principal, devido, condicao.toUpperCase(), id]
+        [nome.toUpperCase(), cnpj, endereco, telefone, email.toLowerCase(), contato, devido, condicao.toUpperCase(), id]
     );
     await audit('FORNECEDORES', 'UPDATE', id, ant, req.body, req.ip);
     ok(res, { msg: 'Fornecedor atualizado com sucesso!' });
@@ -432,8 +449,7 @@ app.delete('/fornecedores/:id', wrap(async (req, res) => {
 
 app.get('/clientes', wrap(async (req, res) => {
     ok(res, await db.all(
-        `SELECT ID,NOME_COMPLETO,TELEFONE,EMAIL,ENDERECO,CONSENTIMENTO_LGPD,DATA_CONSENTIMENTO,
-         ULTIMA_COMPRA_DATA,ULTIMA_COMPRA_VALOR FROM CLIENTES WHERE ATIVO=1 ORDER BY NOME_COMPLETO`
+        'SELECT ID,NOME_COMPLETO,TELEFONE,EMAIL,ENDERECO,CONSENTIMENTO_LGPD,DATA_CONSENTIMENTO,ULTIMA_COMPRA_DATA,ULTIMA_COMPRA_VALOR FROM CLIENTES WHERE ATIVO=1 ORDER BY NOME_COMPLETO'
     ));
 }));
 
@@ -443,13 +459,10 @@ app.post('/clientes', wrap(async (req, res) => {
     const email = sanitize(req.body.email || '');
     const endereco = sanitize(req.body.endereco || '');
     const cpf = req.body.cpf ? req.body.cpf.replace(/\D/g, '') : null;
-    const consentimento_lgpd = req.body.consentimento_lgpd;
-
     if (!nome) return fail(res, 'Nome completo é obrigatório');
     if (!tel) return fail(res, 'Telefone é obrigatório');
     if (email && !validarEmail(email)) return fail(res, 'E-mail inválido');
-    if (!consentimento_lgpd) return fail(res, 'O consentimento LGPD é obrigatório para o cadastro.');
-
+    if (!req.body.consentimento_lgpd) return fail(res, 'O consentimento LGPD é obrigatório para o cadastro.');
     const cripto = cpf ? CryptoJS.AES.encrypt(cpf, SECRET_KEY).toString() : null;
     const r = await db.run(
         "INSERT INTO CLIENTES (NOME_COMPLETO,CPF_CRIPTO,TELEFONE,EMAIL,ENDERECO,CONSENTIMENTO_LGPD,DATA_CONSENTIMENTO) VALUES (?,?,?,?,?,1,datetime('now','localtime'))",
@@ -464,18 +477,13 @@ app.put('/clientes/:id', wrap(async (req, res) => {
     if (!id) return fail(res, 'ID inválido', 400);
     const ant = await db.get('SELECT * FROM CLIENTES WHERE ID=?', [id]);
     if (!ant) return fail(res, 'Cliente não encontrado', 404);
-
     const nome = sanitize(req.body.nome || '') || ant.NOME_COMPLETO;
     const tel = sanitize(req.body.tel || '') || ant.TELEFONE;
     const email = sanitize(req.body.email || '') || ant.EMAIL;
     const endereco = sanitize(req.body.endereco || '') || ant.ENDERECO;
-
     if (email && !validarEmail(email)) return fail(res, 'E-mail inválido');
-
-    await db.run(
-        'UPDATE CLIENTES SET NOME_COMPLETO=?,TELEFONE=?,EMAIL=?,ENDERECO=? WHERE ID=?',
-        [nome.toUpperCase(), tel, email.toLowerCase(), endereco, id]
-    );
+    await db.run('UPDATE CLIENTES SET NOME_COMPLETO=?,TELEFONE=?,EMAIL=?,ENDERECO=? WHERE ID=?',
+        [nome.toUpperCase(), tel, email.toLowerCase(), endereco, id]);
     await audit('CLIENTES', 'UPDATE', id, { nome: ant.NOME_COMPLETO }, req.body, req.ip);
     ok(res, { msg: 'Cliente atualizado com sucesso!' });
 }));
@@ -522,11 +530,11 @@ app.delete('/associacao', wrap(async (req, res) => {
 }));
 
 app.get('/vendas', wrap(async (req, res) => {
-    ok(res, await db.all(`
-        SELECT V.*,P.NOME_PRODUTO,C.NOME_COMPLETO CLIENTE_NOME FROM VENDAS V
-        LEFT JOIN PRODUTOS P ON V.PRODUTO_ID=P.ID LEFT JOIN CLIENTES C ON V.CLIENTE_ID=C.ID
-        ORDER BY V.ID DESC LIMIT 50
-    `));
+    ok(res, await db.all(
+        `SELECT V.*,P.NOME_PRODUTO,C.NOME_COMPLETO CLIENTE_NOME FROM VENDAS V
+         LEFT JOIN PRODUTOS P ON V.PRODUTO_ID=P.ID LEFT JOIN CLIENTES C ON V.CLIENTE_ID=C.ID
+         ORDER BY V.ID DESC LIMIT 50`
+    ));
 }));
 
 app.post('/vendas', wrap(async (req, res) => {
@@ -536,27 +544,21 @@ app.post('/vendas', wrap(async (req, res) => {
     const forma_pagamento = sanitize(String(req.body.forma_pagamento || 'DINHEIRO')).toUpperCase();
     const pago = req.body.pago === undefined ? 1 : (req.body.pago ? 1 : 0);
     const data_vencimento = sanitize(req.body.data_vencimento || '');
-
     if (!produto_id) return fail(res, 'produto_id é obrigatório');
     if (!quantidade || quantidade <= 0) return fail(res, 'Quantidade inválida');
-
     const prod = await db.get('SELECT * FROM PRODUTOS WHERE ID=? AND ATIVO=1', [produto_id]);
     if (!prod) return fail(res, 'Produto não encontrado', 404);
     if (prod.QUANTIDADE < quantidade) return fail(res, `Estoque insuficiente. Disponível: ${prod.QUANTIDADE}`);
-
     const desconto = FORMAS_DESCONTO.includes(forma_pagamento) ? TAXA_DESCONTO : 0;
     const precoFinal = prod.PRECO * (1 - desconto);
     const total = precoFinal * quantidade;
-
     const r = await db.run(
         'INSERT INTO VENDAS (CLIENTE_ID,PRODUTO_ID,QUANTIDADE,PRECO_UNITARIO,DESCONTO_PERCENTUAL,TOTAL,FORMA_PAGAMENTO,PAGO,DATA_VENCIMENTO) VALUES (?,?,?,?,?,?,?,?,?)',
         [cliente_id, produto_id, quantidade, precoFinal, desconto * 100, total, forma_pagamento, pago, data_vencimento || null]
     );
     await db.run('UPDATE PRODUTOS SET QUANTIDADE=QUANTIDADE-? WHERE ID=?', [quantidade, produto_id]);
-    if (cliente_id) {
-        await db.run("UPDATE CLIENTES SET ULTIMA_COMPRA_DATA=datetime('now','localtime'),ULTIMA_COMPRA_VALOR=? WHERE ID=?", [total, cliente_id]);
-    }
-    await audit('VENDAS', 'INSERT', r.lastID, null, req.body, req.ip);
+    if (cliente_id) await db.run("UPDATE CLIENTES SET ULTIMA_COMPRA_DATA=datetime('now','localtime'),ULTIMA_COMPRA_VALOR=? WHERE ID=?", [total, cliente_id]);
+    await audit('VENDAS', 'INSERT', r.lastID, null, { produto_id, quantidade, forma_pagamento, total }, req.ip);
     ok(res, { msg: 'Venda registrada!', id: r.lastID, total, desconto_aplicado: desconto > 0 }, 201);
 }));
 
